@@ -1,0 +1,6 @@
+.venv/
+browser_profile/
+data/latest.json
+data/latest.txt
+__pycache__/
+*.pyc
