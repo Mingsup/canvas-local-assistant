@@ -1,0 +1,47 @@
+name: macOS compatibility
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  macos-smoke-test:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate launch scripts
+        run: |
+          bash -n run_mac.command
+          bash -n run_mac_en.command
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install chromium
+
+      - name: Validate Python and macOS imports
+        run: |
+          python -m py_compile canvas_assistant.py
+          python - <<'PY'
+          import os
+          import sys
+          import tkinter
+
+          assert sys.platform == "darwin"
+          os.environ["CANVAS_ASSISTANT_LANGUAGE"] = "en"
+          import canvas_assistant as app
+          assert app.t("中文", "English") == "English"
+          assert app.safe_filename('lecture: week/1.pdf') == "lecture_ week_1.pdf"
+          assert app.due_category(None, False) == "no_due"
+          assert app.load_windows_credential() is None
+          print("macOS imports, Keychain fallback, and English mode: OK")
+          PY
