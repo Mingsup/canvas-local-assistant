@@ -1,4 +1,4 @@
-Canvas Local Assistant v1.4 (Windows + macOS)
+Canvas Local Assistant v1.5 (Windows + macOS)
 
 功能：
 - 启动后立即读取一次 Canvas。
@@ -13,6 +13,9 @@ Canvas Local Assistant v1.4 (Windows + macOS)
 - “教师公告”标签显示公告列表和正文详情。
 - “全部课程”标签汇总每门课的作业、完成情况与公告数量。
 - 双击作业、公告或课程可直接在浏览器中打开对应 Canvas 页面。
+- “智能简报”自动合并近期截止作业、新公告和新课程文件，生成行动优先级。
+- “课程文件”列出各课程 Canvas 文件，支持新文件、最近 30 天和全部文件筛选。
+- 支持 Ctrl/Command 多选文件，并按课程分别下载到用户指定目录。
 - 界面中可以随时点击“立即刷新”。
 - 结果写入 data\latest.txt 和 data\latest.json。
 

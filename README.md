@@ -1,4 +1,4 @@
-# Canvas Local Assistant v1.4
+# Canvas Local Assistant v1.5
 
 A local Windows and macOS desktop app for Northwestern Canvas. It refreshes every five hours and displays all accessible courses, upcoming assignments, submission status, and recent instructor announcements.
 
@@ -10,6 +10,9 @@ A local Windows and macOS desktop app for Northwestern Canvas. It refreshes ever
 - Automatic five-hour refresh plus a manual refresh button.
 - Double-click a course, assignment, or announcement to open it in Canvas.
 - Canvas pagination and duplicate-assignment handling.
+- A smart brief that combines urgent assignments, new announcements, and newly posted course files into an action plan.
+- A course file center with new, last-30-days, and all-files filters.
+- Multi-select downloads organized into per-course folders chosen by the user.
 
 ## Windows
 

@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 
-echo [Setup] Canvas Local Assistant v1.4 for Windows
+echo [Setup] Canvas Local Assistant v1.5 for Windows
 echo.
 
 if not exist ".venv\Scripts\python.exe" (

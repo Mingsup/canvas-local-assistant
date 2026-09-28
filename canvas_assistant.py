@@ -12,7 +12,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 if sys.platform == "win32":
     import ctypes
@@ -207,6 +207,20 @@ def previous_announcement_ids():
     }
 
 
+def previous_file_ids():
+    path = DATA_DIR / "latest.json"
+    try:
+        old = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {
+        item.get("id")
+        for course in old.get("courses", [])
+        for item in course.get("files", [])
+        if item.get("id") is not None
+    }
+
+
 def clean_text(value):
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
@@ -326,6 +340,7 @@ def read_canvas(status_callback=lambda _message: None):
 
             courses = []
             known_announcement_ids = previous_announcement_ids()
+            known_file_ids = previous_file_ids()
             now = datetime.now().astimezone()
             for index, raw_course in enumerate(courses_raw, start=1):
                 course_id = raw_course.get("id")
@@ -399,6 +414,31 @@ def read_canvas(status_callback=lambda _message: None):
                         "is_new": announcement_id not in known_announcement_ids,
                     })
 
+                file_error = ""
+                try:
+                    files_raw = api_pages(
+                        context,
+                        f"/api/v1/courses/{course_id}/files",
+                        {"per_page": 100, "sort": "updated_at", "order": "desc"},
+                    )
+                except Exception as exc:
+                    files_raw = []
+                    file_error = str(exc)
+
+                files = []
+                for item in files_raw:
+                    file_id = item.get("id")
+                    files.append({
+                        "id": file_id,
+                        "name": clean_text(item.get("display_name") or item.get("filename")),
+                        "filename": item.get("filename") or item.get("display_name") or f"file-{file_id}",
+                        "size": item.get("size") or 0,
+                        "content_type": item.get("content-type") or item.get("content_type") or "",
+                        "updated_at": item.get("updated_at") or item.get("created_at"),
+                        "url": item.get("url") or "",
+                        "is_new": file_id not in known_file_ids,
+                    })
+
                 courses.append({
                     "id": str(course_id),
                     "name": name,
@@ -408,8 +448,10 @@ def read_canvas(status_callback=lambda _message: None):
                     "url": f"{BASE_URL}/courses/{course_id}",
                     "assignments": assignments,
                     "announcements": announcements,
+                    "files": files,
                     "error": error,
                     "announcement_error": announcement_error,
+                    "file_error": file_error,
                 })
 
             return {
@@ -418,6 +460,46 @@ def read_canvas(status_callback=lambda _message: None):
             }
         finally:
             context.close()
+
+
+def safe_filename(value):
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value or "download")
+    return name.strip(" .") or "download"
+
+
+def download_canvas_files(items, destination, status_callback=lambda _message: None):
+    """Download selected Canvas files using the saved authenticated session."""
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    downloaded = []
+    with sync_playwright() as playwright:
+        context = _open_context(playwright, headless=True)
+        try:
+            for index, item in enumerate(items, start=1):
+                status_callback(t(
+                    f"正在下载 {index}/{len(items)}：{item['name']}",
+                    f"Downloading {index}/{len(items)}: {item['name']}",
+                ))
+                response = context.request.get(item["url"], timeout=120000)
+                host = (urlparse(response.url).hostname or "").lower()
+                if response.status in (401, 403) or host == "login.microsoftonline.com":
+                    raise LoginRequired(t("Canvas 登录已过期，请先刷新并重新登录", "Canvas sign-in expired; refresh and sign in again"))
+                if not response.ok:
+                    raise RuntimeError(f"HTTP {response.status}: {item['name']}")
+
+                course_dir = destination / safe_filename(item.get("course_name") or "Canvas")
+                course_dir.mkdir(parents=True, exist_ok=True)
+                target = course_dir / safe_filename(item.get("filename") or item["name"])
+                stem, suffix = target.stem, target.suffix
+                counter = 2
+                while target.exists():
+                    target = course_dir / f"{stem} ({counter}){suffix}"
+                    counter += 1
+                target.write_bytes(response.body())
+                downloaded.append(target)
+        finally:
+            context.close()
+    return downloaded
 
 
 def write_output(result):
@@ -530,12 +612,21 @@ class CanvasAssistantApp:
 
         self.tabs = ttk.Notebook(frame)
         self.tabs.pack(fill="both", expand=True)
+        self.brief_tab = ttk.Frame(self.tabs, padding=14)
         self.todo_tab = ttk.Frame(self.tabs, padding=10)
         self.news_tab = ttk.Frame(self.tabs, padding=10)
+        self.files_tab = ttk.Frame(self.tabs, padding=10)
         self.course_tab = ttk.Frame(self.tabs, padding=10)
+        self.tabs.add(self.brief_tab, text=t("  智能简报  ", "  Smart brief  "))
         self.tabs.add(self.todo_tab, text=t("  作业与截止日期  ", "  Assignments & deadlines  "))
         self.tabs.add(self.news_tab, text=t("  教师公告  ", "  Announcements  "))
+        self.tabs.add(self.files_tab, text=t("  课程文件  ", "  Course files  "))
         self.tabs.add(self.course_tab, text=t("  全部课程  ", "  All courses  "))
+
+        ttk.Label(self.brief_tab, text=t("今天的行动建议", "Today's action plan"), font=("Segoe UI", 15, "bold")).pack(anchor="w")
+        ttk.Label(self.brief_tab, text=t("根据截止时间、公告和新文件自动整理", "Automatically prioritized from deadlines, announcements, and new files"), foreground="#666666").pack(anchor="w", pady=(2, 10))
+        self.brief_text = tk.Text(self.brief_tab, wrap="word", state="disabled", font=("Segoe UI", 11), relief="flat", padx=8, pady=8)
+        self.brief_text.pack(fill="both", expand=True)
 
         filter_row = ttk.Frame(self.todo_tab)
         filter_row.pack(fill="x", pady=(0, 8))
@@ -584,21 +675,45 @@ class CanvasAssistantApp:
         self.news_detail = tk.Text(news_bottom, height=7, wrap="word", state="disabled", font=("Segoe UI", 10), relief="flat")
         self.news_detail.pack(fill="both", expand=True)
 
+        file_controls = ttk.Frame(self.files_tab)
+        file_controls.pack(fill="x", pady=(0, 8))
+        ttk.Label(file_controls, text=t("显示：", "Show:")).pack(side="left")
+        self.file_filter = tk.StringVar(value=t("新文件", "New files"))
+        file_filter_box = ttk.Combobox(
+            file_controls, textvariable=self.file_filter, state="readonly", width=16,
+            values=[t("新文件", "New files"), t("最近 30 天", "Last 30 days"), t("全部文件", "All files")],
+        )
+        file_filter_box.pack(side="left")
+        file_filter_box.bind("<<ComboboxSelected>>", lambda _event: self._render_files())
+        self.download_button = ttk.Button(file_controls, text=t("下载所选文件", "Download selected"), command=self.download_selected_files)
+        self.download_button.pack(side="right")
+        ttk.Label(file_controls, text=t("可按 Ctrl/Command 多选", "Use Ctrl/Command to select multiple files"), foreground="#666666").pack(side="right", padx=10)
+        self.files_tree = self._make_tree(
+            self.files_tab,
+            ("new", "course", "name", "type", "size", "updated"),
+            (("new", t("状态", "Status"), 60), ("course", t("课程", "Course"), 230),
+             ("name", t("文件名", "File name"), 360), ("type", t("类型", "Type"), 120),
+             ("size", t("大小", "Size"), 85), ("updated", t("更新时间", "Updated"), 165)),
+            selectmode="extended",
+        )
+        self.files_tree.tag_configure("new", foreground="#4f2683")
+
         self.course_tree = self._make_tree(
             self.course_tab,
-            ("course", "term", "total", "pending", "done", "news"),
+            ("course", "term", "total", "pending", "done", "news", "files"),
             (("course", t("课程", "Course"), 360), ("term", t("学期", "Term"), 170),
              ("total", t("作业", "Assignments"), 80), ("pending", t("未完成", "Incomplete"), 90),
-             ("done", t("已完成", "Completed"), 90), ("news", t("近 30 天公告", "30-day announcements"), 110)),
+             ("done", t("已完成", "Completed"), 90), ("news", t("近 30 天公告", "30-day announcements"), 110),
+             ("files", t("课程文件", "Files"), 80)),
         )
 
         self.root.after(300, self._poll_events)
         self.root.after(700, self._initial_start)
 
-    def _make_tree(self, parent, columns, definitions):
+    def _make_tree(self, parent, columns, definitions, selectmode="browse"):
         container = ttk.Frame(parent)
         container.pack(fill="both", expand=True)
-        tree = ttk.Treeview(container, columns=columns, show="headings", selectmode="browse")
+        tree = ttk.Treeview(container, columns=columns, show="headings", selectmode=selectmode)
         scrollbar = ttk.Scrollbar(container, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
         tree.pack(side="left", fill="both", expand=True)
@@ -720,11 +835,27 @@ class CanvasAssistantApp:
                         1 for course in result["courses"]
                         for item in course.get("announcements", []) if item.get("is_new")
                     )
+                    new_files = sum(
+                        1 for course in result["courses"]
+                        for item in course.get("files", []) if item.get("is_new")
+                    )
                     self.status_var.set(t(
-                        f"刷新成功：{len(result['courses'])} 门课程，{total} 个作业，{new_announcements} 条新公告",
-                        f"Refresh complete: {len(result['courses'])} courses, {total} assignments, {new_announcements} new announcements",
+                        f"刷新成功：{len(result['courses'])} 门课程，{total} 个作业，{new_announcements} 条新公告，{new_files} 个新文件",
+                        f"Refresh complete: {len(result['courses'])} courses, {total} assignments, {new_announcements} new announcements, {new_files} new files",
                     ))
                     self._show_summary(result)
+                elif kind == "download_success":
+                    self.download_button.configure(state="normal")
+                    paths = value
+                    self.status_var.set(t(f"已下载 {len(paths)} 个文件", f"Downloaded {len(paths)} files"))
+                    messagebox.showinfo(
+                        t("下载完成", "Download complete"),
+                        t(f"已下载 {len(paths)} 个文件。", f"Downloaded {len(paths)} files."),
+                    )
+                elif kind == "download_error":
+                    self.download_button.configure(state="normal")
+                    self.status_var.set(t(f"下载失败：{value}", f"Download failed: {value}"))
+                    messagebox.showerror(t("下载失败", "Download failed"), value)
                 elif kind == "error":
                     self.running = False
                     self.refresh_button.configure(state="normal")
@@ -761,9 +892,45 @@ class CanvasAssistantApp:
         self.card_vars["overdue"].set(str(overdue))
         self.card_vars["week"].set(str(week))
         self.card_vars["news"].set(str(news))
+        self._render_brief()
         self._render_assignments()
         self._render_announcements()
+        self._render_files()
         self._render_courses()
+
+    def _render_brief(self):
+        if not self.result:
+            return
+        urgent = []
+        announcements = []
+        files = []
+        for course in self.result["courses"]:
+            urgent.extend((course, item) for item in course["assignments"] if item.get("due_category") in {"overdue", "due_24h", "due_3d", "due_7d"})
+            announcements.extend((course, item) for item in course.get("announcements", []) if item.get("is_new"))
+            files.extend((course, item) for item in course.get("files", []) if item.get("is_new"))
+        urgent.sort(key=lambda pair: (DUE_ORDER.index(pair[1]["due_category"]), pair[1].get("due_at") or ""))
+
+        lines = []
+        if urgent:
+            lines.append(t("优先处理", "Priority work"))
+            for course, item in urgent[:12]:
+                lines.append(f"  • {DUE_LABELS[item['due_category']]} · {item['title']}\n    {course['name']} · {self._display_time(item.get('due_at'))}")
+        else:
+            lines.append(t("✓ 未来 7 天没有未完成的截止作业。", "✓ No incomplete assignments are due within the next seven days."))
+        if announcements:
+            lines.extend(["", t(f"新公告（{len(announcements)}）", f"New announcements ({len(announcements)})")])
+            for course, item in announcements[:8]:
+                lines.append(f"  • {item['title']} · {course['name']}")
+        if files:
+            lines.extend(["", t(f"新课程文件（{len(files)}）", f"New course files ({len(files)})")])
+            for course, item in files[:8]:
+                lines.append(f"  • {item['name']} · {course['name']}")
+        if not announcements and not files:
+            lines.extend(["", t("没有检测到新公告或新文件。", "No new announcements or files were detected.")])
+        self.brief_text.configure(state="normal")
+        self.brief_text.delete("1.0", "end")
+        self.brief_text.insert("1.0", "\n".join(lines))
+        self.brief_text.configure(state="disabled")
 
     @staticmethod
     def _display_time(value):
@@ -831,6 +998,65 @@ class CanvasAssistantApp:
             self.item_urls[(str(self.news_tree), item_id)] = item.get("url")
             self.announcement_items[item_id] = (course, item)
 
+    @staticmethod
+    def _display_size(value):
+        size = float(value or 0)
+        for unit in ("B", "KB", "MB", "GB"):
+            if size < 1024 or unit == "GB":
+                return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+            size /= 1024
+
+    def _render_files(self):
+        self._clear_tree(self.files_tree)
+        self.file_items = {}
+        if not self.result:
+            return
+        mode = self.file_filter.get()
+        cutoff = datetime.now().astimezone() - timedelta(days=30)
+        rows = []
+        for course in self.result["courses"]:
+            for item in course.get("files", []):
+                if mode == t("新文件", "New files") and not item.get("is_new"):
+                    continue
+                if mode == t("最近 30 天", "Last 30 days"):
+                    updated = parse_canvas_time(item.get("updated_at"))
+                    if not updated or updated.astimezone() < cutoff:
+                        continue
+                rows.append((course, item))
+        rows.sort(key=lambda pair: pair[1].get("updated_at") or "", reverse=True)
+        for index, (course, item) in enumerate(rows):
+            item_id = f"file-{index}"
+            item_with_course = {**item, "course_name": course["name"]}
+            self.files_tree.insert("", "end", iid=item_id, values=(
+                "NEW" if item.get("is_new") else "", course["name"], item["name"],
+                item.get("content_type") or "—", self._display_size(item.get("size")),
+                self._display_time(item.get("updated_at")),
+            ), tags=("new",) if item.get("is_new") else ())
+            self.file_items[item_id] = item_with_course
+            self.item_urls[(str(self.files_tree), item_id)] = item.get("url")
+
+    def download_selected_files(self):
+        selected = self.files_tree.selection()
+        if not selected:
+            messagebox.showinfo(
+                t("请选择文件", "Select files"),
+                t("请先在课程文件列表中选择一个或多个文件。", "Select one or more files from the course files list."),
+            )
+            return
+        destination = filedialog.askdirectory(title=t("选择下载目录", "Choose download folder"))
+        if not destination:
+            return
+        items = [self.file_items[item_id] for item_id in selected if item_id in self.file_items]
+        self.download_button.configure(state="disabled")
+        threading.Thread(target=self._download_worker, args=(items, destination), daemon=True).start()
+
+    def _download_worker(self, items, destination):
+        try:
+            paths = download_canvas_files(items, destination, lambda message: self._post("status", message))
+            self._post("download_success", paths)
+        except Exception as exc:
+            self._post("download_error", str(exc))
+
     def _render_courses(self):
         self._clear_tree(self.course_tree)
         if not self.result:
@@ -841,7 +1067,7 @@ class CanvasAssistantApp:
             item_id = f"course-{index}"
             self.course_tree.insert("", "end", iid=item_id, values=(
                 course["name"], course.get("term") or "—", len(course["assignments"]),
-                pending, done, len(course.get("announcements", [])),
+                pending, done, len(course.get("announcements", [])), len(course.get("files", [])),
             ))
             self.item_urls[(str(self.course_tree), item_id)] = course.get("url")
 
