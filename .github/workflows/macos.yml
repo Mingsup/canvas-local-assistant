@@ -39,9 +39,16 @@ jobs:
           assert sys.platform == "darwin"
           os.environ["CANVAS_ASSISTANT_LANGUAGE"] = "en"
           import canvas_assistant as app
+          from playwright.sync_api import sync_playwright
           assert app.t("中文", "English") == "English"
           assert app.safe_filename('lecture: week/1.pdf') == "lecture_ week_1.pdf"
           assert app.due_category(None, False) == "no_due"
           assert app.load_windows_credential() is None
+          with sync_playwright() as playwright:
+              browser = playwright.chromium.launch(headless=True)
+              page = browser.new_page()
+              page.set_content("<title>Canvas test</title>")
+              assert page.title() == "Canvas test"
+              browser.close()
           print("macOS imports, Keychain fallback, and English mode: OK")
           PY
